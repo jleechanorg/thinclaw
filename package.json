@@ -26,5 +26,8 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "axios": "^1.14.0",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.3"
   }
 }

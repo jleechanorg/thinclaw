@@ -357,14 +357,14 @@ if (mode === "stdio") {
 
         // Handle JSON-RPC requests
         if (request.method === "tools/list") {
-          const result = await handleListTools();
+          const result = await handleHttpListTools();
           res.writeHead(200, { "Content-Type": MIME_TYPE });
           res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
           return;
         }
 
         if (request.method === "tools/call") {
-          const result = await handleToolCall(request.params);
+          const result = await handleHttpToolCall(request.params);
           res.writeHead(200, { "Content-Type": MIME_TYPE });
           res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
           return;
@@ -390,32 +390,133 @@ if (mode === "stdio") {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP transport helpers (mirror the stdio handlers)
+// HTTP transport helpers (standalone — mirror stdio tool logic)
 // ---------------------------------------------------------------------------
 
-async function handleListTools() {
-  const handler = server._requestHandlers?.get("tools/list");
-  if (handler) {
-    const result = await handler({});
-    return result;
-  }
-  // Fallback: return static list
-  return {
-    tools: [
-      { name: "openclaw_execute", description: "Universal execution tool", inputSchema: { type: "object", properties: { tool: { type: "string" }, params: { type: "object" } }, required: ["tool"] } },
-      { name: "send_whatsapp", description: "Send WhatsApp message", inputSchema: { type: "object", properties: { to: { type: "string" }, message: { type: "string" } }, required: ["to", "message"] } },
-      { name: "schedule_cron", description: "Schedule cron task", inputSchema: { type: "object", properties: { schedule: { type: "string" }, task: { type: "string" } }, required: ["schedule", "task"] } },
-      { name: "run_shell", description: "Run shell command", inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
-      { name: "trigger_cowork_workflow", description: "Trigger Cowork workflow", inputSchema: { type: "object", properties: { workflow: { type: "string" }, context: { type: "object" } }, required: ["workflow"] } },
-    ]
-  };
+const TOOL_DEFINITIONS = [
+  {
+    name: "openclaw_execute",
+    description: "Universal execution tool: proxies any OpenClaw tool via POST /tools/invoke. Performs ZERO inference.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool: { type: "string", description: "OpenClaw tool name (e.g. bash, read_file, grep)" },
+        params: { type: "object", description: "Tool parameters as key-value pairs" },
+      },
+      required: ["tool"],
+    },
+  },
+  {
+    name: "send_whatsapp",
+    description: "Send a WhatsApp message via OpenClaw Gateway.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Recipient phone number or WhatsApp contact ID" },
+        message: { type: "string", description: "Message text" },
+      },
+      required: ["to", "message"],
+    },
+  },
+  {
+    name: "schedule_cron",
+    description: "Schedule a recurring task via OpenClaw Gateway cron.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        schedule: { type: "string", description: "Cron expression, e.g. '*/5 * * * *'" },
+        task: { type: "string", description: "Task name or command to schedule" },
+      },
+      required: ["schedule", "task"],
+    },
+  },
+  {
+    name: "run_shell",
+    description: "Execute a shell command directly via OpenClaw Gateway.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Shell command to execute" },
+      },
+      required: ["command"],
+    },
+  },
+  {
+    name: "trigger_cowork_workflow",
+    description: "Trigger a Claude Cowork workflow via ~/AI_Bridge/inbox handoff.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workflow: { type: "string", description: "Workflow name to trigger" },
+        context: { type: "object", description: "Additional context to pass" },
+      },
+      required: ["workflow"],
+    },
+  },
+];
+
+async function handleHttpListTools() {
+  return { tools: TOOL_DEFINITIONS };
 }
 
-async function handleToolCall(params) {
-  const { name, arguments: args } = params;
-  const handler = server._requestHandlers?.get("tools/call");
-  if (handler) {
-    return await handler({ params: { name, arguments: args } });
+async function handleHttpToolCall(params) {
+  const { name, arguments: args = {} } = params;
+
+  try {
+    if (name === "openclaw_execute") {
+      const { tool, params: toolParams } = args;
+      const response = await gateway.post("/tools/invoke", { tool, params: toolParams || {} });
+      return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+    }
+
+    if (name === "send_whatsapp") {
+      const { to, message } = args;
+      const response = await gateway.post("/tools/invoke", {
+        tool: "whatsapp_send",
+        params: { to, message },
+      });
+      return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+    }
+
+    if (name === "schedule_cron") {
+      const { schedule, task } = args;
+      const response = await gateway.post("/tools/invoke", {
+        tool: "schedule_cron",
+        params: { schedule, task },
+      });
+      return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+    }
+
+    if (name === "run_shell") {
+      const { command } = args;
+      const response = await gateway.post("/tools/invoke", {
+        tool: "bash",
+        params: { command },
+      });
+      return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+    }
+
+    if (name === "trigger_cowork_workflow") {
+      const { workflow, context } = args;
+      const filename = `trigger-${Date.now()}.json`;
+      const filepath = join(AI_BRIDGE_INBOX, filename);
+      const payload = { workflow, context: context || {}, triggered_at: new Date().toISOString() };
+      writeFileSync(filepath, JSON.stringify(payload, null, 2));
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true, file: filepath, payload }, null, 2) }] };
+    }
+
+    throw new Error(`Unknown tool: ${name}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (err instanceof z.ZodError) {
+      return { content: [{ type: "text", text: `Schema validation error:\n${err.message}` }], isError: true };
+    }
+    if (err?.response) {
+      return {
+        content: [{ type: "text", text: `Gateway error (${err.response.status}): ${JSON.stringify(err.response.data, null, 2)}` }],
+        isError: true,
+      };
+    }
+    return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
   }
-  throw new Error(`Unknown tool: ${name}`);
 }
