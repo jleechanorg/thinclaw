@@ -2,16 +2,18 @@
 /**
  * thinclaw — Thin inference-less MCP server for OpenClaw Gateway
  *
- * Architecture: This server performs ZERO LLM inference. It exposes
- * OpenClaw Gateway tools via the MCP stdio protocol. External AIs
- * (Perplexity, Claude Cowork, Claude Desktop, etc.) call these tools
- * and do their own inference. This server is a pure HTTP proxy.
+ * Architecture:
+ *   Claude Cowork (or Perplexity/Claude Desktop) = brain (reasoning, planning,
+ *   Computer Use, Projects, Dispatch, scheduled tasks) — ONE inference per cycle.
+ *   OpenClaw = lightweight body / tool executor — pure daemon, NO Claude model for
+ *   tool calls. thinclaw = bridge — Node.js stdio MCP server calling OpenClaw
+ *   Gateway REST endpoints DIRECTLY. Zero inference here.
  *
- * Gateway docs: http://localhost:18789 (configurable via GATEWAY_URL env)
- * Auth: token read from GATEWAY_TOKEN env or ~/.openclaw/openclaw.json
+ * Gateway: http://localhost:18789 (configurable via GATEWAY_URL env)
+ * Auth:    token from GATEWAY_TOKEN env or ~/.openclaw/openclaw.json
  */
 
-import { readFileSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -44,32 +46,55 @@ const GATEWAY_TOKEN =
 
 const gateway = axios.create({
   baseURL: GATEWAY_URL,
-  timeout: 120_000, // allow long gateway runs
+  timeout: 120_000,
   headers: {
     Authorization: `Bearer ${GATEWAY_TOKEN}`,
     "Content-Type": "application/json",
   },
 });
 
+// ~/AI_Bridge layout for cron → Cowork handoff
+const AI_BRIDGE_INBOX = join(process.env.HOME || "", "AI_Bridge", "inbox");
+const AI_BRIDGE_OUTBOX = join(process.env.HOME || "", "AI_Bridge", "outbox");
+const AI_BRIDGE_PROCESSED = join(process.env.HOME || "", "AI_Bridge", "processed");
+
+function ensureAI_BridgeDirs() {
+  for (const dir of [AI_BRIDGE_INBOX, AI_BRIDGE_OUTBOX, AI_BRIDGE_PROCESSED]) {
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch {
+      // already exists
+    }
+  }
+}
+ensureAI_BridgeDirs();
+
 // ---------------------------------------------------------------------------
-// Tool schemas (Zod)
+// Tool schemas
 // ---------------------------------------------------------------------------
 
 const OpenclawExecuteSchema = z.object({
   tool: z.string().describe("OpenClaw tool name to invoke (e.g. bash, read_file)"),
-  params: z.record(z.any()).optional().describe("Tool parameters"),
-  skill: z.string().optional().describe("Skill name (alternative to tool)"),
+  params: z.record(z.any()).optional().describe("Tool parameters as key-value pairs"),
 });
 
 const SendWhatsappSchema = z.object({
   to: z.string().describe("Recipient phone number or contact ID"),
-  body: z.string().describe("Message text"),
+  message: z.string().describe("Message text"),
+});
+
+const ScheduleCronSchema = z.object({
+  schedule: z.string().describe("Cron expression, e.g. '*/5 * * * *'"),
+  task: z.string().describe("Task name or command to schedule"),
 });
 
 const RunShellSchema = z.object({
   command: z.string().describe("Shell command to execute"),
-  cwd: z.string().optional().describe("Working directory"),
-  timeout: z.number().optional().describe("Timeout in seconds (default 60)"),
+});
+
+const TriggerCoworkWorkflowSchema = z.object({
+  workflow: z.string().describe("Workflow name to trigger"),
+  context: z.record(z.any()).optional().describe("Additional context to pass"),
 });
 
 // ---------------------------------------------------------------------------
@@ -82,9 +107,7 @@ const server = new Server(
     version: "1.0.0",
   },
   {
-    capabilities: {
-      tools: {},
-    },
+    capabilities: { tools: {} },
   }
 );
 
@@ -96,26 +119,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "openclaw_execute",
         description:
-          "Universal execution tool: proxies any OpenClaw tool via the Gateway REST API. " +
+          "Universal execution tool: proxies any OpenClaw tool via POST /tools/invoke. " +
           "Performs ZERO inference — this is a pure HTTP relay. " +
-          "Use this when you need file operations, code execution, Slack, Git, or any " +
-          "OpenClaw tool but want the calling AI to do all reasoning.",
+          "Claude Cowork/Perplexity provides all reasoning; this server only carries the call.",
         inputSchema: {
           type: "object",
           properties: {
             tool: {
               type: "string",
-              description: "OpenClaw tool name (e.g. bash, read_file, grep, todo_list_write)",
+              description:
+                "OpenClaw tool name (e.g. bash, read_file, grep, todo_list_write, slack_postMessage)",
             },
             params: {
               type: "object",
               description: "Tool parameters as key-value pairs",
-            },
-            skill: {
-              type: "string",
-              description:
-                "Optional skill name to invoke (e.g. debugging, frontend-design). " +
-                "Skill invocation takes priority over tool name.",
             },
           },
           required: ["tool"],
@@ -125,7 +142,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "send_whatsapp",
         description:
           "Send a WhatsApp message via OpenClaw Gateway. " +
-          "Proxy to POST /tools/invoke with tool=whatsapp_send.",
+          "Proxies to POST /skills/whatsapp/send.",
         inputSchema: {
           type: "object",
           properties: {
@@ -133,19 +150,39 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Recipient phone number or WhatsApp contact ID",
             },
-            body: {
+            message: {
               type: "string",
               description: "Message text",
             },
           },
-          required: ["to", "body"],
+          required: ["to", "message"],
+        },
+      },
+      {
+        name: "schedule_cron",
+        description:
+          "Schedule a recurring task via OpenClaw Gateway cron. " +
+          "Proxies to POST /cron/schedule.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            schedule: {
+              type: "string",
+              description: "Cron expression, e.g. '*/5 * * * *'",
+            },
+            task: {
+              type: "string",
+              description: "Task name or command to schedule",
+            },
+          },
+          required: ["schedule", "task"],
         },
       },
       {
         name: "run_shell",
         description:
-          "Execute a shell command via OpenClaw Gateway bash tool. " +
-          "Proxy to POST /tools/invoke with tool=bash.",
+          "Execute a shell command directly via OpenClaw Gateway. " +
+          "Proxies to POST /shell/exec.",
         inputSchema: {
           type: "object",
           properties: {
@@ -153,16 +190,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Shell command to execute",
             },
-            cwd: {
-              type: "string",
-              description: "Working directory (optional)",
-            },
-            timeout: {
-              type: "number",
-              description: "Timeout in seconds (default 60, max 600)",
-            },
           },
           required: ["command"],
+        },
+      },
+      {
+        name: "trigger_cowork_workflow",
+        description:
+          "Trigger a Claude Cowork workflow via the AI_Bridge inbox handoff. " +
+          "Writes a JSON flag file to ~/AI_Bridge/inbox/trigger-<timestamp>.json. " +
+          "Used by OpenClaw cron jobs to hand off to Cowork for reasoning (ONE inference per cycle).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            workflow: {
+              type: "string",
+              description: "Workflow name to trigger (e.g. 'daily-standup', 'code-review')",
+            },
+            context: {
+              type: "object",
+              description: "Additional context to pass to the workflow",
+            },
+          },
+          required: ["workflow"],
         },
       },
     ],
@@ -176,66 +226,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     if (name === "openclaw_execute") {
-      const parsed = OpenclawExecuteSchema.parse(args);
-      const body = parsed.skill
-        ? { skill: parsed.skill, params: parsed.params || {} }
-        : { tool: parsed.tool, params: parsed.params || {} };
+      const { tool, params } = OpenclawExecuteSchema.parse(args);
+      const response = await gateway.post("/tools/invoke", { tool, params: params || {} });
+      return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+    }
 
-      const response = await gateway.post("/tools/invoke", body);
+    if (name === "send_whatsapp") {
+      const { to, message } = SendWhatsappSchema.parse(args);
+      const response = await gateway.post("/skills/whatsapp/send", { to, message });
+      return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+    }
+
+    if (name === "schedule_cron") {
+      const { schedule, task } = ScheduleCronSchema.parse(args);
+      const response = await gateway.post("/cron/schedule", { schedule, task });
+      return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+    }
+
+    if (name === "run_shell") {
+      const { command } = RunShellSchema.parse(args);
+      const response = await gateway.post("/shell/exec", { command });
+      return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+    }
+
+    if (name === "trigger_cowork_workflow") {
+      const { workflow, context } = TriggerCoworkWorkflowSchema.parse(args);
+      const filename = `trigger-${Date.now()}.json`;
+      const filepath = join(AI_BRIDGE_INBOX, filename);
+      const payload = {
+        workflow,
+        context: context || {},
+        triggered_at: new Date().toISOString(),
+      };
+      writeFileSync(filepath, JSON.stringify(payload, null, 2));
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(response.data, null, 2),
+            text: JSON.stringify({ ok: true, file: filepath, payload }, null, 2),
           },
         ],
-      };
-    }
-
-    if (name === "send_whatsapp") {
-      const { to, body: message } = SendWhatsappSchema.parse(args);
-      const response = await gateway.post("/tools/invoke", {
-        tool: "whatsapp_send",
-        params: { to, body: message },
-      });
-      return {
-        content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
-      };
-    }
-
-    if (name === "run_shell") {
-      const { command, cwd, timeout } = RunShellSchema.parse(args);
-      const response = await gateway.post("/tools/invoke", {
-        tool: "bash",
-        params: {
-          command,
-          ...(cwd ? { cwd } : {}),
-          timeoutSeconds: timeout || 60,
-        },
-      });
-      return {
-        content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
       };
     }
 
     throw new Error(`Unknown tool: ${name}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const isZodError = err instanceof z.ZodError;
 
-    if (isZodError) {
+    if (err instanceof z.ZodError) {
       return {
-        content: [
-          {
-            type: "text",
-            text: `Schema validation error:\n${err.message}`,
-          },
-        ],
+        content: [{ type: "text", text: `Schema validation error:\n${err.message}` }],
         isError: true,
       };
     }
 
-    // Axios errors
     if (err?.response) {
       return {
         content: [
@@ -252,10 +296,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    return {
-      content: [{ type: "text", text: `Error: ${message}` }],
-      isError: true,
-    };
+    return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
   }
 });
 

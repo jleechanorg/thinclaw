@@ -2,20 +2,24 @@
 
 **Thin inference-less MCP server for OpenClaw Gateway.**
 
-This server exposes OpenClaw tools via the Model Context Protocol (MCP) stdio transport. It performs **zero LLM inference** — it is a pure HTTP relay that proxies tool calls to the local OpenClaw Gateway. External AIs (Claude Desktop, Perplexity Computer, Claude Cowork, etc.) provide all reasoning; this server just handles transport.
+A zero-inference bridge that exposes OpenClaw tool execution via the Model Context Protocol (MCP) stdio transport. Claude Cowork (or Perplexity, Claude Desktop) provides all reasoning — this server only relays tool calls to the local OpenClaw Gateway.
 
 ## Architecture
 
 ```
-┌─────────────┐     MCP stdio      ┌──────────────┐    HTTP REST    ┌──────────────┐
-│  Perplexity │ ─────────────────► │   thinclaw   │ ──────────────► │ OpenClaw     │
-│  Claude     │   zero inference   │   (this)     │  /tools/invoke  │ Gateway      │
-│  Cowork     │ ◄───────────────── │              │ ◄────────────── │ localhost    │
-│  Desktop    │   tool result      └──────────────┘    JSON result   │  :18789      │
-└─────────────┘                   (Node.js, no LLM)                    └──────────────┘
+┌─────────────────┐  MCP stdio   ┌──────────────┐  HTTP REST  ┌──────────────────┐
+│  Claude Cowork  │ ───────────► │   thinclaw   │ ──────────► │  OpenClaw         │
+│  Perplexity     │  zero LLM    │   (this)     │  /tools/    │  Gateway          │
+│  Claude Desktop │ ◄─────────── │  Node.js     │  invoke     │  localhost:18789  │
+└─────────────────┘  tool result └──────────────┘ ◄────────── └──────────────────┘
+
+Cognitive split:
+  Claude Cowork  = brain (reasoning, planning, Computer Use, Projects, Dispatch)
+  OpenClaw       = body  (file ops, bash, Slack, Git — pure daemon, no LLM calls)
+  thinclaw       = bridge (stdio ↔ REST, zero inference)
 ```
 
-**Key design principle:** The calling AI decides *what* to do. This server only carries *how* to do it. No model, no inference, no token generation.
+**Zero inference by design.** The calling AI decides *what* to do. This server only carries *how*. No model, no tokens, no latency from inference.
 
 ## Prerequisites
 
@@ -23,15 +27,21 @@ This server exposes OpenClaw tools via the Model Context Protocol (MCP) stdio tr
 - OpenClaw Gateway running locally on `http://localhost:18789`
 - Gateway auth token (auto-read from `~/.openclaw/openclaw.json` or set via `GATEWAY_TOKEN` env)
 
+### Getting the Gateway Token
+
+```bash
+cat ~/.openclaw/openclaw.json | python3 -c \
+  "import json,sys; d=json.load(sys.stdin); print(d['gateway']['auth']['token'])"
+```
+
 ## Quick Start
 
 ```bash
-# Install
 git clone https://github.com/jleechanorg/thinclaw.git
 cd thinclaw
 npm install
 
-# Run (uses token from ~/.openclaw/openclaw.json automatically)
+# Run — token auto-read from ~/.openclaw/openclaw.json
 npm start
 ```
 
@@ -51,47 +61,76 @@ Universal execution proxy. Calls `POST /tools/invoke` on the Gateway.
 ```json
 {
   "tool": "bash",
-  "params": { "command": "ls -la", "cwd": "/tmp", "timeoutSeconds": 30 }
+  "params": { "command": "ls -la ~", "cwd": "/tmp", "timeoutSeconds": 30 }
 }
 ```
 
-Or invoke a full skill:
-
-```json
-{
-  "skill": "debugging",
-  "params": { "issue": "server crashing on startup" }
-}
-```
+Supports any OpenClaw tool: `bash`, `read_file`, `grep`, `todo_list_write`, `slack_postMessage`, etc.
 
 ### `send_whatsapp`
 
-Convenience wrapper around the OpenClaw `whatsapp_send` tool.
+Send a WhatsApp message. Calls `POST /skills/whatsapp/send`.
 
 ```json
 {
   "to": "+1234567890",
-  "body": "Hello from thinclaw!"
+  "message": "Hello from thinclaw!"
+}
+```
+
+### `schedule_cron`
+
+Schedule a recurring cron task via the Gateway. Calls `POST /cron/schedule`.
+
+```json
+{
+  "schedule": "*/5 * * * *",
+  "task": "check-deployments"
 }
 ```
 
 ### `run_shell`
 
-Convenience wrapper around the OpenClaw `bash` tool.
+Execute a shell command directly. Calls `POST /shell/exec`.
 
 ```json
 {
-  "command": "find . -name '*.log' | head -5",
-  "cwd": "/Users/jleechan",
-  "timeout": 30
+  "command": "find . -name '*.log' | head -5"
 }
 ```
+
+### `trigger_cowork_workflow`
+
+Write a JSON flag file to `~/AI_Bridge/inbox/` for cron → Cowork handoff. The calling AI (Cowork) monitors this directory and picks up work on its next inference cycle.
+
+```json
+{
+  "workflow": "daily-standup",
+  "context": { "channel": "#engineering", "time": "09:30" }
+}
+```
+
+This creates `~/AI_Bridge/inbox/trigger-<timestamp>.json`.
+
+## AI_Bridge Folder
+
+Created automatically at `~/AI_Bridge/` with three subdirectories:
+
+```
+~/AI_Bridge/
+  inbox/       — flag files written by thinclaw (cron → Cowork handoff)
+  outbox/      — Cowork writes results here after processing
+  processed/   — moved here after Cowork consumes them
+```
+
+Cowork monitors `~/AI_Bridge/inbox/` and reacts to new `trigger-*.json` files.
 
 ## MCP Client Setup
 
 ### Claude Desktop (macOS)
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+1. Open `~/Library/Application Support/Claude/claude_desktop_config.json`
+2. Add the thinclaw MCP server:
 
 ```json
 {
@@ -107,25 +146,31 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
+3. Restart Claude Desktop
+
 ### Claude Cowork (claude.ai)
 
-Cowork uses the MCP stdio connector. Configure via the Cowork MCP settings panel with:
+Configure via the Cowork MCP settings panel:
 
-- **Command:** `node`
-- **Args:** `/absolute/path/to/thinclaw/server.js`
-- **Env:** `GATEWAY_TOKEN=your-token-here`
+| Field | Value |
+|---|---|
+| Command | `node` |
+| Args | `/absolute/path/to/thinclaw/server.js` |
+| Env | `GATEWAY_TOKEN=your-token-here` |
+
+Cowork will then have access to all five tools. Zero inference on the thinclaw side.
 
 ### Perplexity Computer
 
 Perplexity's computer use also supports MCP stdio. Configure similarly:
 
 ```bash
-# Or run directly to verify
-GATEWAY_TOKEN=$(node -e "console.log(require('/Users/jleechan/.openclaw/openclaw.json').gateway.auth.token)") \
-  node server.js
+GATEWAY_TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c \
+  "import json,sys; print(json.load(sys.stdin)['gateway']['auth']['token'])") \
+  node /path/to/thinclaw/server.js
 ```
 
-## Auto-Start (launchd on macOS)
+## Auto-Start with launchd (macOS)
 
 Create `~/Library/LaunchAgents/com.thinclaw.plist`:
 
@@ -151,22 +196,37 @@ Create `~/Library/LaunchAgents/com.thinclaw.plist`:
 </plist>
 ```
 
-Then:
-
 ```bash
 launchctl load ~/Library/LaunchAgents/com.thinclaw.plist
 ```
 
+Verify:
+
+```bash
+launchctl print gui/$(id -u)/com.thinclaw
+```
+
+## Gateway Endpoints Reference
+
+thinclaw proxies to these Gateway REST endpoints:
+
+| Method | Path | thinclaw Tool |
+|---|---|---|
+| `POST` | `/tools/invoke` | `openclaw_execute` |
+| `POST` | `/skills/whatsapp/send` | `send_whatsapp` |
+| `POST` | `/cron/schedule` | `schedule_cron` |
+| `POST` | `/shell/exec` | `run_shell` |
+| local | `~/AI_Bridge/inbox/` | `trigger_cowork_workflow` |
+
 ## Expanding with More Tools
 
-Each tool in this server is a thin wrapper around a Gateway endpoint. To add a new tool:
+Each tool is a thin wrapper around a Gateway endpoint. To add a new tool:
 
-1. Add a Zod schema in `server.js`
-2. Add the handler in the `CallToolRequestSchema` switch
+1. Add a Zod schema at the top of `server.js`
+2. Add a case in the `CallToolRequestSchema` switch
 3. Add the tool definition in `ListToolsRequestSchema`
-4. Update this README
 
-Example — add `openclaw_memory_search`:
+**Example — add `openclaw_memory_search`:**
 
 ```javascript
 // Schema
@@ -181,22 +241,28 @@ if (name === "openclaw_memory_search") {
   const response = await gateway.post("/memory/search", { query, limit });
   return { content: [{ type: "text", text: JSON.stringify(response.data) }] };
 }
+
+// In ListToolsRequestSchema:
+{
+  name: "openclaw_memory_search",
+  description: "Search OpenClaw memory via POST /memory/search.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Search query" },
+      limit: { type: "number", description: "Max results (default 5)" },
+    },
+    required: ["query"],
+  },
+}
 ```
-
-## Gateway Endpoints Reference
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/tools/invoke` | Invoke any OpenClaw tool |
-| `POST` | `/skills/<name>/invoke` | Invoke a named skill |
-| `GET` | `/health` | Gateway health check |
 
 ## Security Notes
 
 - This server runs locally and communicates with the local Gateway only
-- The `GATEWAY_TOKEN` grants full access to all OpenClaw tools — treat it like a secret
+- `GATEWAY_TOKEN` grants full access to all OpenClaw tools — treat it like a secret
 - No data leaves your machine except to `localhost:18789`
-- Inference happens entirely in the calling AI (Perplexity, Claude, etc.)
+- All inference happens entirely in the calling AI (Claude Cowork, Perplexity, etc.)
 
 ## License
 
