@@ -29,7 +29,9 @@ import { z } from "zod";
 // ---------------------------------------------------------------------------
 
 const GATEWAY_URL =
-  process.env.GATEWAY_URL || "http://localhost:18789";
+  process.env.OPENCLAW_GATEWAY_ADDR ||
+  process.env.GATEWAY_URL ||
+  "http://localhost:18789";
 const GATEWAY_TOKEN =
   process.env.GATEWAY_TOKEN ||
   (() => {

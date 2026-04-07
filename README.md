@@ -49,7 +49,8 @@ npm start
 
 | Variable | Default | Description |
 |---|---|---|
-| `GATEWAY_URL` | `http://localhost:18789` | OpenClaw Gateway base URL |
+| `OPENCLAW_GATEWAY_ADDR` | `http://localhost:18789` | OpenClaw Gateway base URL (preferred) |
+| `GATEWAY_URL` | `http://localhost:18789` | Alias for OPENCLAW_GATEWAY_ADDR |
 | `GATEWAY_TOKEN` | auto-read from `~/.openclaw/openclaw.json` | Bearer token for Gateway auth |
 
 ## Available Tools
@@ -187,7 +188,7 @@ Create `~/Library/LaunchAgents/com.thinclaw.plist`:
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>GATEWAY_URL</key><string>http://localhost:18789</string>
+    <key>OPENCLAW_GATEWAY_ADDR</key><string>http://localhost:18789</string>
     <key>GATEWAY_TOKEN</key><string>YOUR_TOKEN_HERE</string>
   </dict>
   <key>RunAtLoad</key><true/>
