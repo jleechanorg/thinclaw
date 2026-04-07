@@ -177,6 +177,28 @@ GATEWAY_TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c \
   node /path/to/thinclaw/server.js
 ```
 
+## HTTP Transport Mode
+
+By default, thinclaw uses **stdio** transport (Claude Desktop, Cowork, Perplexity). Pass `--http` to switch to HTTP mode for clients that prefer HTTP JSON-RPC:
+
+```bash
+node server.js --http
+# thinclaw HTTP server listening on http://localhost:18790/mcp
+```
+
+| Env var | Default | Description |
+|---|---|---|
+| `THINCLAW_HTTP_PORT` | `18790` | HTTP server port |
+
+HTTP mode accepts `POST /mcp` with JSON-RPC 2.0 `tools/list` and `tools/call` requests. CORS is enabled for cross-origin access.
+
+```bash
+# Example: list tools via HTTP
+curl -X POST http://localhost:18790/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
 ## Auto-Start with launchd (macOS)
 
 Create `~/Library/LaunchAgents/com.thinclaw.plist`:

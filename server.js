@@ -14,8 +14,9 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { createServer } from "node:http";
 import { join } from "path";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
@@ -103,7 +104,7 @@ const TriggerCoworkWorkflowSchema = z.object({
 // MCP Server
 // ---------------------------------------------------------------------------
 
-const server = new Server(
+const server = new McpServer(
   {
     name: "thinclaw",
     version: "1.0.0",
@@ -315,8 +316,106 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // Main
 // ---------------------------------------------------------------------------
 
-const transport = new StdioServerTransport();
-server.connect(transport).catch((err) => {
-  console.error("Failed to connect transport:", err);
-  process.exit(1);
-});
+const mode = process.argv.includes("--http") ? "http" : "stdio";
+
+if (mode === "stdio") {
+  const transport = new StdioServerTransport();
+  server.connect(transport).catch((err) => {
+    console.error("Failed to connect transport:", err);
+    process.exit(1);
+  });
+} else {
+  // HTTP mode — each JSON-RPC request is a POST, response is JSON
+  // Claude Desktop / Cursor / Claude Code MCP over HTTP
+  const HTTP_PORT = parseInt(process.env.THINCLAW_HTTP_PORT || "18790", 10);
+  const MIME_TYPE = "application/json";
+
+  const httpServer = createServer(async (req, res) => {
+    // CORS headers
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcptoolsid");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.method !== "POST") {
+      res.writeHead(405);
+      res.end(JSON.stringify({ error: "Method not allowed" }));
+      return;
+    }
+
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const request = JSON.parse(body);
+        const id = request.id;
+
+        // Handle JSON-RPC requests
+        if (request.method === "tools/list") {
+          const result = await handleListTools();
+          res.writeHead(200, { "Content-Type": MIME_TYPE });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
+          return;
+        }
+
+        if (request.method === "tools/call") {
+          const result = await handleToolCall(request.params);
+          res.writeHead(200, { "Content-Type": MIME_TYPE });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
+          return;
+        }
+
+        // Unknown method
+        res.writeHead(400, { "Content-Type": MIME_TYPE });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": MIME_TYPE });
+        res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32603, message: String(err) } }));
+      }
+    });
+  });
+
+  httpServer.listen(HTTP_PORT, () => {
+    console.log(`thinclaw HTTP server listening on http://localhost:${HTTP_PORT}/mcp`);
+  });
+  httpServer.on("error", (err) => {
+    console.error("HTTP server error:", err);
+    process.exit(1);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// HTTP transport helpers (mirror the stdio handlers)
+// ---------------------------------------------------------------------------
+
+async function handleListTools() {
+  const handler = server._requestHandlers?.get("tools/list");
+  if (handler) {
+    const result = await handler({});
+    return result;
+  }
+  // Fallback: return static list
+  return {
+    tools: [
+      { name: "openclaw_execute", description: "Universal execution tool", inputSchema: { type: "object", properties: { tool: { type: "string" }, params: { type: "object" } }, required: ["tool"] } },
+      { name: "send_whatsapp", description: "Send WhatsApp message", inputSchema: { type: "object", properties: { to: { type: "string" }, message: { type: "string" } }, required: ["to", "message"] } },
+      { name: "schedule_cron", description: "Schedule cron task", inputSchema: { type: "object", properties: { schedule: { type: "string" }, task: { type: "string" } }, required: ["schedule", "task"] } },
+      { name: "run_shell", description: "Run shell command", inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+      { name: "trigger_cowork_workflow", description: "Trigger Cowork workflow", inputSchema: { type: "object", properties: { workflow: { type: "string" }, context: { type: "object" } }, required: ["workflow"] } },
+    ]
+  };
+}
+
+async function handleToolCall(params) {
+  const { name, arguments: args } = params;
+  const handler = server._requestHandlers?.get("tools/call");
+  if (handler) {
+    return await handler({ params: { name, arguments: args } });
+  }
+  throw new Error(`Unknown tool: ${name}`);
+}
