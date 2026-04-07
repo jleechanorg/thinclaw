@@ -70,7 +70,7 @@ Supports any OpenClaw tool: `bash`, `read_file`, `grep`, `todo_list_write`, `sla
 
 ### `send_whatsapp`
 
-Send a WhatsApp message. Calls `POST /skills/whatsapp/send`.
+Send a WhatsApp message. Calls `POST /tools/invoke` with tool=`whatsapp_send`.
 
 ```json
 {
@@ -79,9 +79,11 @@ Send a WhatsApp message. Calls `POST /skills/whatsapp/send`.
 }
 ```
 
+> Requires `whatsapp_send` to be a registered OpenClaw tool.
+
 ### `schedule_cron`
 
-Schedule a recurring cron task via the Gateway. Calls `POST /cron/schedule`.
+Schedule a recurring cron task via the Gateway. Calls `POST /tools/invoke` with tool=`schedule_cron`.
 
 ```json
 {
@@ -90,15 +92,19 @@ Schedule a recurring cron task via the Gateway. Calls `POST /cron/schedule`.
 }
 ```
 
+> Requires `schedule_cron` to be a registered OpenClaw tool.
+
 ### `run_shell`
 
-Execute a shell command directly. Calls `POST /shell/exec`.
+Execute a shell command directly. Calls `POST /tools/invoke` with tool=`bash`.
 
 ```json
 {
   "command": "find . -name '*.log' | head -5"
 }
 ```
+
+> Requires `bash` to be a registered OpenClaw tool.
 
 ### `trigger_cowork_workflow`
 
@@ -209,15 +215,17 @@ launchctl print gui/$(id -u)/com.thinclaw
 
 ## Gateway Endpoints Reference
 
-thinclaw proxies to these Gateway REST endpoints:
+thinclaw proxies all tools to the single Gateway REST endpoint `POST /tools/invoke`:
 
-| Method | Path | thinclaw Tool |
+| thinclaw Tool | Gateway Tool Name | Params |
 |---|---|---|
-| `POST` | `/tools/invoke` | `openclaw_execute` |
-| `POST` | `/skills/whatsapp/send` | `send_whatsapp` |
-| `POST` | `/cron/schedule` | `schedule_cron` |
-| `POST` | `/shell/exec` | `run_shell` |
-| local | `~/AI_Bridge/inbox/` | `trigger_cowork_workflow` |
+| `openclaw_execute` | (any tool name) | `{ tool, params }` |
+| `send_whatsapp` | `whatsapp_send` | `{ to, message }` |
+| `schedule_cron` | `schedule_cron` | `{ schedule, task }` |
+| `run_shell` | `bash` | `{ command }` |
+| `trigger_cowork_workflow` | (local FS only) | writes `~/AI_Bridge/inbox/trigger-<ts>.json` |
+
+> **Note:** Gateway tools must be registered in your OpenClaw config. `memory_search` is the only tool confirmed available in the default staging gateway. Other tools (`bash`, `whatsapp_send`, etc.) require corresponding OpenClaw plugins or agent tools to be enabled.
 
 ## Expanding with More Tools
 

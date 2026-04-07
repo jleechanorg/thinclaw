@@ -235,19 +235,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === "send_whatsapp") {
       const { to, message } = SendWhatsappSchema.parse(args);
-      const response = await gateway.post("/skills/whatsapp/send", { to, message });
+      const response = await gateway.post("/tools/invoke", {
+        tool: "whatsapp_send",
+        params: { to, message },
+      });
       return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
     }
 
     if (name === "schedule_cron") {
       const { schedule, task } = ScheduleCronSchema.parse(args);
-      const response = await gateway.post("/cron/schedule", { schedule, task });
+      const response = await gateway.post("/tools/invoke", {
+        tool: "schedule_cron",
+        params: { schedule, task },
+      });
       return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
     }
 
     if (name === "run_shell") {
       const { command } = RunShellSchema.parse(args);
-      const response = await gateway.post("/shell/exec", { command });
+      const response = await gateway.post("/tools/invoke", {
+        tool: "bash",
+        params: { command },
+      });
       return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
     }
 
