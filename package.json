@@ -1,0 +1,30 @@
+{
+  "name": "thinclaw",
+  "version": "1.0.0",
+  "description": "Thin inference-less MCP server for OpenClaw Gateway",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "thinclaw": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jleechanorg/thinclaw.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/jleechanorg/thinclaw/issues"
+  },
+  "homepage": "https://github.com/jleechanorg/thinclaw#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "axios": "^1.14.0",
+    "zod": "^4.3.6"
+  }
+}
