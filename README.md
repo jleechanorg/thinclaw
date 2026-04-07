@@ -7,16 +7,26 @@ A zero-inference bridge that exposes OpenClaw tool execution via the Model Conte
 ## Architecture
 
 ```
-┌─────────────────┐  MCP stdio   ┌──────────────┐  HTTP REST  ┌──────────────────┐
-│  Claude Cowork  │ ───────────► │   thinclaw   │ ──────────► │  OpenClaw         │
-│  Perplexity     │  zero LLM    │   (this)     │  /tools/    │  Gateway          │
-│  Claude Desktop │ ◄─────────── │  Node.js     │  invoke     │  localhost:18789  │
-└─────────────────┘  tool result └──────────────┘ ◄────────── └──────────────────┘
+                    MCP stdio                          HTTP JSON-RPC
+┌──────────────────────┐                    ┌──────────────────────────┐
+│  Claude Desktop      │                    │  Claude Code (MCP HTTP)   │
+│  Claude Cowork        │                    │  Cursor (MCP HTTP)        │
+│  Perplexity           │ ────────────────►  │  Codex CLI                │
+│  Codex CLI           │   thinclaw stdio   │                          │
+│  Gemini CLI           │                    │                          │
+└──────────────────────┘                    └─────┬──────────────────────┘
+                                                  │ thinclaw --http
+                                                  ▼
+                     ┌──────────────┐  HTTP REST  ┌──────────────────┐
+                     │   thinclaw   │ ──────────► │  OpenClaw         │
+                     │   (this)     │  /tools/   │  Gateway          │
+                     │  Node.js     │  invoke    │  localhost:18789  │
+                     └──────────────┘ ◄───────── └──────────────────┘
 
 Cognitive split:
-  Claude Cowork  = brain (reasoning, planning, Computer Use, Projects, Dispatch)
+  Claude Cowork / Claude Code / Cursor  = brain (reasoning, planning)
   OpenClaw       = body  (file ops, bash, Slack, Git — pure daemon, no LLM calls)
-  thinclaw       = bridge (stdio ↔ REST, zero inference)
+  thinclaw       = bridge (stdio/HTTP ↔ REST, zero inference)
 ```
 
 **Zero inference by design.** The calling AI decides *what* to do. This server only carries *how*. No model, no tokens, no latency from inference.
@@ -41,8 +51,11 @@ git clone https://github.com/jleechanorg/thinclaw.git
 cd thinclaw
 npm install
 
-# Run — token auto-read from ~/.openclaw/openclaw.json
+# Run stdio mode (Claude Desktop, Cowork, Perplexity, Codex CLI)
 npm start
+
+# Or run HTTP mode (Claude Code, Cursor)
+node server.js --http
 ```
 
 ### Environment Variables
@@ -134,10 +147,7 @@ Cowork monitors `~/AI_Bridge/inbox/` and reacts to new `trigger-*.json` files.
 
 ## MCP Client Setup
 
-### Claude Desktop (macOS)
-
-1. Open `~/Library/Application Support/Claude/claude_desktop_config.json`
-2. Add the thinclaw MCP server:
+### Claude Desktop (macOS) — stdio
 
 ```json
 {
@@ -153,9 +163,52 @@ Cowork monitors `~/AI_Bridge/inbox/` and reacts to new `trigger-*.json` files.
 }
 ```
 
-3. Restart Claude Desktop
+Restart Claude Desktop after editing.
 
-### Claude Cowork (claude.ai)
+### Claude Code — HTTP
+
+In your `~/.claude/settings.json` (or project-level `.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "thinclaw": {
+      "url": "http://127.0.0.1:18790/mcp",
+      "http": {}
+    }
+  }
+}
+```
+
+Start thinclaw in HTTP mode first:
+
+```bash
+node ~/thinclaw/server.js --http
+```
+
+### Cursor — HTTP
+
+In Cursor settings → MCP Servers, add:
+
+| Field | Value |
+|---|---|
+| URL | `http://127.0.0.1:18790/mcp` |
+| Transport | `http` |
+
+Or via `~/.cursor/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "thinclaw": {
+      "url": "http://127.0.0.1:18790/mcp",
+      "http": {}
+    }
+  }
+}
+```
+
+### Claude Cowork (claude.ai) — stdio
 
 Configure via the Cowork MCP settings panel:
 
@@ -165,11 +218,17 @@ Configure via the Cowork MCP settings panel:
 | Args | `/absolute/path/to/thinclaw/server.js` |
 | Env | `GATEWAY_TOKEN=your-token-here` |
 
-Cowork will then have access to all five tools. Zero inference on the thinclaw side.
+### Codex CLI — stdio
 
-### Perplexity Computer
+```bash
+GATEWAY_TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c \
+  "import json,sys; print(json.load(sys.stdin)['gateway']['auth']['token'])") \
+  node ~/thinclaw/server.js
+```
 
-Perplexity's computer use also supports MCP stdio. Configure similarly:
+### Perplexity Computer — stdio
+
+Perplexity's computer use supports MCP stdio. Configure via Perplexity settings or env:
 
 ```bash
 GATEWAY_TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c \
@@ -177,9 +236,19 @@ GATEWAY_TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c \
   node /path/to/thinclaw/server.js
 ```
 
+### Gemini CLI — stdio
+
+```bash
+GATEWAY_TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c \
+  "import json,sys; print(json.load(sys.stdin)['gateway']['auth']['token'])") \
+  node /path/to/thinclaw/server.js
+```
+
+> **Note:** Gemini CLI MCP commands may hang depending on CLI version — verify with `gemini mcp --help` first.
+
 ## HTTP Transport Mode
 
-By default, thinclaw uses **stdio** transport (Claude Desktop, Cowork, Perplexity). Pass `--http` to switch to HTTP mode for clients that prefer HTTP JSON-RPC:
+By default, thinclaw uses **stdio** transport. Pass `--http` for HTTP JSON-RPC mode (used by Claude Code, Cursor):
 
 ```bash
 node server.js --http
@@ -193,7 +262,7 @@ node server.js --http
 HTTP mode accepts `POST /mcp` with JSON-RPC 2.0 `tools/list` and `tools/call` requests. CORS is enabled for cross-origin access.
 
 ```bash
-# Example: list tools via HTTP
+# Test: list tools via HTTP
 curl -X POST http://localhost:18790/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
