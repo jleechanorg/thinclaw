@@ -11,6 +11,8 @@
  * Auth: token read from GATEWAY_TOKEN env or ~/.openclaw/openclaw.json
  */
 
+import { readFileSync } from "fs";
+import { join } from "path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -30,11 +32,9 @@ const GATEWAY_TOKEN =
   process.env.GATEWAY_TOKEN ||
   (() => {
     try {
-      const fs = await import("fs");
-      const path = await import("path");
       const home = process.env.HOME || "";
       const cfg = JSON.parse(
-        fs.readFileSync(path.join(home, ".openclaw", "openclaw.json"), "utf8")
+        readFileSync(join(home, ".openclaw", "openclaw.json"), "utf8")
       );
       return cfg?.gateway?.auth?.token || "";
     } catch {
