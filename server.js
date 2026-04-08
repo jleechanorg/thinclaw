@@ -128,6 +128,21 @@ const TOOLS = [
     description: "Signal Claude Cowork via ~/AI_Bridge/inbox flag file",
     inputSchema: { type: "object", properties: { workflow: { type: "string" }, context: { type: "object" } }, required: ["workflow"] },
   },
+  {
+    name: "list_agents",
+    description: "List available agents from OpenClaw config (multi-agent support)",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_agent_profile",
+    description: "Get agent profile info (name, ID, subagent settings) by agent ID",
+    inputSchema: { type: "object", properties: { agent_id: { type: "string" } }, required: ["agent_id"] },
+  },
+  {
+    name: "setup_info",
+    description: "Get thinclaw setup info (Gateway URL, MCP endpoint, transport mode, features)",
+    inputSchema: { type: "object", properties: {} },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -190,6 +205,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const filename = `trigger-${Date.now()}.json`;
       writeFileSync(join(AI_BRIDGE_INBOX, filename), JSON.stringify({ workflow: args.workflow, context: args.context || {}, triggered_at: new Date().toISOString() }, null, 2));
       return { content: [{ type: "text", text: `Triggered workflow: ${args.workflow}` }] };
+    }
+    if (name === "list_agents") {
+      const r = await gateway.post("/tools/invoke", { tool: "agents_list", params: {} });
+      return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+    }
+    if (name === "get_agent_profile") {
+      // Try to get agent config via openclaw_execute with various possible tool names
+      try {
+        const r = await gateway.post("/tools/invoke", { tool: "agent_config_get", params: { agent_id: args.agent_id } });
+        return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+      } catch (e) {
+        // Fallback: use config.get via openclaw_execute
+        try {
+          const r = await gateway.post("/tools/invoke", { tool: "openclaw_execute", params: { tool: "config", action: "get", args: { path: `agents.list.${args.agent_id}` } } });
+          return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+        } catch (e2) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "Agent config not available", agent_id: args.agent_id, hint: "Use list_agents to see available agents" }) }] };
+        }
+      }
+    }
+    if (name === "setup_info") {
+      const info = {
+        gateway_url: GATEWAY_URL,
+        transport: useHttp ? "http" : "stdio",
+        http_port: useHttp ? HTTP_PORT : null,
+        features: ["tools_execution", "multi_agent", "workflow_trigger"],
+        available_tools: TOOLS.map(t => t.name),
+      };
+      return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
     }
     return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
   } catch (err) {
@@ -267,6 +311,30 @@ if (!useHttp) {
               const filename = `trigger-${Date.now()}.json`;
               writeFileSync(join(AI_BRIDGE_INBOX, filename), JSON.stringify({ workflow: args.workflow, context: args.context || {}, triggered_at: new Date().toISOString() }, null, 2));
               result = { content: [{ type: "text", text: `Triggered workflow: ${args.workflow}` }] };
+            } else if (name === "list_agents") {
+              const r = await gateway.post("/tools/invoke", { tool: "agents_list", params: {} });
+              result = { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+            } else if (name === "get_agent_profile") {
+              try {
+                const r = await gateway.post("/tools/invoke", { tool: "agent_config_get", params: { agent_id: args.agent_id } });
+                result = { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+              } catch (e) {
+                try {
+                  const r2 = await gateway.post("/tools/invoke", { tool: "openclaw_execute", params: { tool: "config", action: "get", args: { path: `agents.list.${args.agent_id}` } } });
+                  result = { content: [{ type: "text", text: JSON.stringify(r2.data, null, 2) }] };
+                } catch (e2) {
+                  result = { content: [{ type: "text", text: JSON.stringify({ error: "Agent config not available", agent_id: args.agent_id, hint: "Use list_agents to see available agents" }) }] };
+                }
+              }
+            } else if (name === "setup_info") {
+              const info = {
+                gateway_url: GATEWAY_URL,
+                transport: useHttp ? "http" : "stdio",
+                http_port: useHttp ? HTTP_PORT : null,
+                features: ["tools_execution", "multi_agent", "workflow_trigger"],
+                available_tools: TOOLS.map(t => t.name),
+              };
+              result = { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
             } else {
               result = { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
             }
